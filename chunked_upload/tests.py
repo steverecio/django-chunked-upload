@@ -211,3 +211,26 @@ class DeleteExpiredUploadsTests(ChunkedUploadTestCase):
         self.assertFalse(os.path.exists(old_path))
         self.assertIn('0 complete uploads were deleted.', out.getvalue())
         self.assertIn('1 incomplete uploads were deleted.', out.getvalue())
+
+
+class RecompletionTests(ChunkedUploadTestCase):
+    def test_completing_a_complete_upload_is_refused(self):
+        upload_id = self.chunk(b'hello').json()['upload_id']
+        md5 = hashlib.md5(b'hello').hexdigest()
+        self.assertEqual(self.complete(upload_id, md5).status_code, 200)
+
+        with mock.patch.object(ChunkedUploadCompleteView, 'on_completion') as on_completion:
+            response = self.complete(upload_id, md5)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Upload has already been marked as complete'})
+        on_completion.assert_not_called()
+
+    def test_completing_an_uploading_session_runs_on_completion_once(self):
+        upload_id = self.chunk(b'hello').json()['upload_id']
+
+        with mock.patch.object(ChunkedUploadCompleteView, 'on_completion') as on_completion:
+            response = self.complete(upload_id, hashlib.md5(b'hello').hexdigest())
+
+        self.assertEqual(response.status_code, 200)
+        on_completion.assert_called_once()
