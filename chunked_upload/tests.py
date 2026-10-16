@@ -234,3 +234,84 @@ class RecompletionTests(ChunkedUploadTestCase):
 
         self.assertEqual(response.status_code, 200)
         on_completion.assert_called_once()
+
+
+class DeclaredRangeTests(ChunkedUploadTestCase):
+    """The stored bytes never exceed the total a chunk declares, so max_bytes bounds them."""
+
+    def test_inverted_range_is_refused(self):
+        upload_id = self.chunk(b'A' * 8, 'bytes 0-7/16').json()['upload_id']
+
+        # The only inverted range the size check lets through: empty, so end - start + 1 == 0.
+        response = self.chunk(b'', 'bytes 8-7/16', upload_id=upload_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Invalid Content-Range'})
+        self.assertEqual(ChunkedUpload.objects.get(upload_id=upload_id).offset, 8)
+
+    def test_chunk_ending_past_its_declared_total_is_refused(self):
+        upload_id = self.chunk(b'A' * 8, 'bytes 0-7/8').json()['upload_id']
+
+        response = self.chunk(b'B' * 8, 'bytes 8-15/8', upload_id=upload_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Invalid Content-Range'})
+        self.assertEqual(ChunkedUpload.objects.get(upload_id=upload_id).offset, 8)
+
+    def test_first_chunk_ending_past_its_declared_total_is_refused_before_anything_is_written(self):
+        with mock.patch.object(
+            ChunkedUploadView, 'create_chunked_upload', autospec=True,
+            side_effect=ChunkedUploadView.create_chunked_upload,
+        ) as create:
+            response = self.chunk(b'A' * 16, 'bytes 0-15/8')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Invalid Content-Range'})
+        self.assertFalse(ChunkedUpload.objects.exists())
+        # create_chunked_upload writes the empty part file; a refused range must never reach it.
+        create.assert_not_called()
+
+    def test_second_chunk_declaring_a_total_below_where_it_would_leave_the_offset_is_refused(self):
+        upload_id = self.chunk(b'A' * 8, 'bytes 0-7/16').json()['upload_id']
+
+        response = self.chunk(b'B' * 16, 'bytes 8-23/12', upload_id=upload_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Invalid Content-Range'})
+        self.assertEqual(ChunkedUpload.objects.get(upload_id=upload_id).offset, 8)
+
+    def test_max_bytes_bounds_the_bytes_stored_even_when_a_chunk_under_declares(self):
+        with mock.patch.object(ChunkedUploadView, 'max_bytes', 10):
+            upload_id = self.chunk(b'A' * 8, 'bytes 0-7/8').json()['upload_id']
+            over = self.chunk(b'B' * 8, 'bytes 8-15/8', upload_id=upload_id)
+            at_limit = self.chunk(b'C' * 2, 'bytes 8-9/10', upload_id=upload_id)
+
+        self.assertEqual(over.status_code, 400)
+        self.assertEqual(over.json(), {'detail': 'Invalid Content-Range'})
+        self.assertEqual(at_limit.status_code, 200)
+        self.assertEqual(ChunkedUpload.objects.get(upload_id=upload_id).offset, 10)
+
+    def test_honest_multi_chunk_upload_is_unaffected(self):
+        upload_id = self.chunk(b'A' * 8, 'bytes 0-7/24').json()['upload_id']
+        self.chunk(b'B' * 8, 'bytes 8-15/24', upload_id=upload_id)
+
+        last = self.chunk(b'C' * 8, 'bytes 16-23/24', upload_id=upload_id)
+
+        self.assertEqual(last.status_code, 200)
+        self.assertEqual(last.json()['offset'], 24)
+
+    def test_resent_chunk_answers_with_the_stored_offset(self):
+        upload_id = self.chunk(b'A' * 8, 'bytes 0-7/16').json()['upload_id']
+        self.chunk(b'B' * 8, 'bytes 8-15/16', upload_id=upload_id)
+
+        resent = self.chunk(b'B' * 8, 'bytes 8-15/16', upload_id=upload_id)
+
+        self.assertEqual(resent.status_code, 400)
+        self.assertEqual(resent.json(), {'detail': 'Offsets do not match', 'offset': 16})
+
+    def test_empty_file_with_an_unparsed_range_takes_the_headerless_path(self):
+        # Some clients send `bytes 0--1/0` for an empty file; it does not parse as a range.
+        response = self.chunk(b'', 'bytes 0--1/0')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ChunkedUpload.objects.get().offset, 0)
