@@ -49,7 +49,9 @@ Typical usage
         "expires": "2013-07-18T17:56:22.186Z"
     }
 
-3. Repeatedly POST subsequent chunks using the ``upload_id`` to identify the upload  to the url linked to ``ChunkedUploadView`` (or any subclass). Example:
+3. 
+Important: For each subsequent chunk, include the Content-Range header to specify the byte range being uploaded.
+Repeatedly POST subsequent chunks using the ``upload_id`` to identify the upload  to the url linked to ``ChunkedUploadView`` (or any subclass). Example:
 
 ::
 
@@ -146,6 +148,7 @@ Support
 -------
 
 If you find any bug or you want to propose a new feature, please use the `issues tracker <https://github.com/juliomalegria/django-chunked-upload/issues>`__. I'll be happy to help you! :-)
+
 Running the tests
 -----------------
 
