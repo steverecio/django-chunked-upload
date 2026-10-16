@@ -178,22 +178,17 @@ class ChunkedUploadView(ChunkedUploadBaseView):
                                      detail='No chunk file was submitted')
         self.validate(request)
 
-        upload_id = request.POST.get('upload_id')
-        if upload_id:
-            chunked_upload = get_object_or_404(self.get_queryset(request),
-                                               upload_id=upload_id)
-            self.is_valid_chunked_upload(chunked_upload)
-        else:
-            attrs = {'filename': chunk.name}
-            attrs.update(self.get_extra_attrs(request))
-            chunked_upload = self.create_chunked_upload(save=False, **attrs)
-
         content_range = request.META.get(self.content_range_header, '')
         match = self.content_range_pattern.match(content_range)
         if match:
             start = int(match.group('start'))
             end = int(match.group('end'))
             total = int(match.group('total'))
+            # With offset == start (checked below), end < total bounds the stored
+            # bytes by the total this chunk declares, which max_bytes judges.
+            if start > end or end >= total:
+                raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
+                                         detail='Invalid Content-Range')
         elif self.fail_if_no_header:
             raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
                                      detail='Error in request headers')
@@ -211,13 +206,24 @@ class ChunkedUploadView(ChunkedUploadBaseView):
                 status=http_status.HTTP_400_BAD_REQUEST,
                 detail='Size of file exceeds the limit (%s bytes)' % max_bytes
             )
+        if chunk.size != chunk_size:
+            raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
+                                     detail="File size doesn't match headers")
+
+        upload_id = request.POST.get('upload_id')
+        if upload_id:
+            chunked_upload = get_object_or_404(self.get_queryset(request),
+                                               upload_id=upload_id)
+            self.is_valid_chunked_upload(chunked_upload)
+        else:
+            attrs = {'filename': chunk.name}
+            attrs.update(self.get_extra_attrs(request))
+            chunked_upload = self.create_chunked_upload(save=False, **attrs)
+
         if chunked_upload.offset != start:
             raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
                                      detail='Offsets do not match',
                                      offset=chunked_upload.offset)
-        if chunk.size != chunk_size:
-            raise ChunkedUploadError(status=http_status.HTTP_400_BAD_REQUEST,
-                                     detail="File size doesn't match headers")
 
         chunked_upload.append_chunk(chunk, chunk_size=chunk_size, save=False)
 
